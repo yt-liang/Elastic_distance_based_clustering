@@ -91,3 +91,6 @@ normalization, and serial/parallel execution.
 ```bash
 Rscript example.R
 ```
+
+## Reference
+Liang, YT., Wang, C. Motif clustering and digital biomarker extraction for free-living physical activity analysis. BioData Mining 18, 8 (2025). https://doi.org/10.1186/s13040-025-00424-1
