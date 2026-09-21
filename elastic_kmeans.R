@@ -53,27 +53,63 @@ assign_clusters <- function(data, ref_mat_list, weight, t, normalize, parallel, 
   list(cluster_label = cluster_label, dist_store = dist_store)
 }
 
+#' Relocate points into any empty clusters (sklearn-style)
+#'
+#' For each empty cluster, steal the sample that currently fits its own
+#' assigned cluster worst (i.e. has the largest distance to its own cluster
+#' center), and reassign it to the empty cluster. If there are multiple empty
+#' clusters, the top-N worst-fit points (across all samples) are chosen at
+#' once so no two empty clusters compete for the same point.
+#'
+#' @return The (possibly modified) `cluster_label` vector.
+relocate_empty_clusters <- function(cluster_label, K, dist_store) {
+  n_samples <- length(cluster_label)
+  counts <- tabulate(cluster_label, nbins = K)
+  empty_clusters <- which(counts == 0)
+
+  if (length(empty_clusters) == 0) return(cluster_label)
+
+  # distance of each sample to the center of its own assigned cluster
+  own_dist <- dist_store[cbind(cluster_label, seq_len(n_samples))]
+
+  ord <- order(own_dist, decreasing = TRUE)
+  n_needed <- length(empty_clusters)
+
+  if (n_needed > n_samples) {
+    stop("More empty clusters than samples available to relocate; ",
+         "reduce K relative to the number of samples.")
+  }
+
+  chosen <- ord[seq_len(n_needed)]
+  cluster_label[chosen] <- empty_clusters
+  cluster_label
+}
+
 update_means <- function(data, cluster_label, K, dist_store) {
   axis_num <- length(data)
   n_time <- nrow(data[[1]])
 
-  lapply(seq_len(axis_num), function(a) {
+  cluster_label <- relocate_empty_clusters(cluster_label, K, dist_store)
+
+  centers <- lapply(seq_len(axis_num), function(a) {
     out <- matrix(0, nrow = K, ncol = n_time)
     for (k in seq_len(K)) {
       idx <- which(cluster_label == k)
-      if (length(idx) > 1) {
-        out[k, ] <- rowMeans(data[[a]][, idx, drop = FALSE])
-      } else if (length(idx) == 1) {
-        out[k, ] <- data[[a]][, idx]
+      if (length(idx) == 0) {
+        stop(sprintf(
+          "Cluster %d is still empty after relocation; K may be too large for this data.",
+          k))
+      }
+      out[k, ] <- if (length(idx) > 1) {
+        rowMeans(data[[a]][, idx, drop = FALSE])
       } else {
-        # empty cluster: re-seed with the point farthest from the other centers
-        dist_other <- dist_store[-k, , drop = FALSE]
-        far_id <- which(dist_other == max(dist_other), arr.ind = TRUE)[1, 2]
-        out[k, ] <- data[[a]][, far_id]
+        data[[a]][, idx]
       }
     }
     out
   })
+
+  list(centers = centers, cluster_label = cluster_label)
 }
 
 #' Elastic-distance k-means clustering for multi-axis functional data
@@ -128,18 +164,18 @@ elastic_kmeans <- function(data, K, weight = NULL, normalize = TRUE,
 
   for (iter in seq_len(max_iter)) {
     assigned <- assign_clusters(data, centers, weight, t_index, normalize, parallel, n_cores)
-    new_centers <- update_means(data, assigned$cluster_label, K, assigned$dist_store)
+    updated <- update_means(data, assigned$cluster_label, K, assigned$dist_store)
 
-    mean_diff <- mean(abs(unlist(new_centers) - unlist(centers)))
-    label_changed <- !identical(assigned$cluster_label, cluster_label)
+    mean_diff <- mean(abs(unlist(updated$centers) - unlist(centers)))
+    label_changed <- !identical(updated$cluster_label, cluster_label)
 
     if (verbose) {
       message(sprintf("iter %d: mean center diff = %.5f, labels changed = %s",
                        iter, mean_diff, label_changed))
     }
 
-    cluster_label <- assigned$cluster_label
-    centers <- new_centers
+    cluster_label <- updated$cluster_label
+    centers <- updated$centers
 
     if (mean_diff <= criteria && !label_changed) {
       converged <- TRUE
